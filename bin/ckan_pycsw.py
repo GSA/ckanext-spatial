@@ -106,6 +106,9 @@ def load(pycsw_config, ckan_url):
             is_collection = True
             if 'collection_package_id' in result['extras']:
                 is_collection = False
+                gathered_records[result['id']]['collection_package_id'] = \
+                    result['extras']['collection_package_id']
+
             gathered_records[result['id']]['ckan_collection'] = is_collection
             if 'source_datajson_identifier' in result['extras']:
                 gathered_records[result['id']]['source'] = 'datajson'
@@ -159,6 +162,7 @@ def load(pycsw_config, ckan_url):
         ckan_info = gathered_records[ckan_id]
         record = get_record(context, repo, ckan_url, ckan_id, ckan_info)
         if not record:
+            log.info('Skipped record %s' % ckan_id)
             continue
         update_dict = dict([(getattr(repo.dataset, key),
         getattr(record, key)) \
@@ -192,6 +196,7 @@ def get_record(context, repo, ckan_url, ckan_id, ckan_info):
 
     query = ckan_url + 'harvest/object/%s'
     url = query % ckan_info['harvest_object_id']
+    log.info('Fetching %s' % url)
     response = requests.get(url)
 
     if not response.ok:
@@ -230,26 +235,52 @@ def get_record(context, repo, ckan_url, ckan_id, ckan_info):
     # from here we have an ISO document no matter what
     try:
         try:
-            #log.debug('parsing XML as is')
+            log.debug('parsing XML as is')
             xml = etree.parse(io.BytesIO(content))
         except:
-            #log.debug('parsing XML with .encode("utf8")')
+            log.debug('parsing XML with .encode("utf8")')
             xml = etree.parse(io.BytesIO(content.encode("utf8")))
     except Exception, err:
         log.error('Could not pass xml doc from %s, Error: %s' % (ckan_id, err))
         return
 
     try:
+        log.debug('Parsing ISO XML')
         record = metadata.parse_record(context, xml, repo)[0]
+        if not record.identifier:  # force id into ISO XML
+            log.info('gmd:fileIdentifier is empty. Inserting id %s' % ckan_id)
+
+            record.identifier = ckan_id
+
+            gmd_ns = 'http://www.isotc211.org/2005/gmd'
+            gco_ns = 'http://www.isotc211.org/2005/gco'
+
+            xname = xml.find('{%s}fileIdentifier' % gmd_ns)
+            if xname is None:  # doesn't exist, insert it
+                log.debug('Inserting new gmd:fileIdentifier')
+                fileid = etree.Element('{%s}fileIdentifier' % gmd_ns)
+                etree.SubElement(fileid, '{%s}CharacterString' % gco_ns).text = ckan_id
+                xml.insert(0, fileid)
+            else:  # gmd:fileIdentifier exists, check for gco:CharacterString
+                log.debug('Updating')
+                value = xname.find('{%s}CharacterString' % gco_ns)
+                if value is None:
+                    log.debug('missing gco:CharacterString')
+                    etree.SubElement(xname, '{%s}CharacterString' % gco_ns).text = ckan_id
+                else:
+                    log.debug('empty gco:CharacterString')
+                    value.text = ckan_id
+            record.xml = etree.tostring(xml)
+
     except Exception, err:
         log.error('Could not extract metadata from %s, Error: %s' % (ckan_id, err))
         return
 
-    if not record.identifier:
-        record.identifier = ckan_id
     record.ckan_id = ckan_id
     record.ckan_modified = ckan_info['metadata_modified']
     record.ckan_collection = ckan_info['ckan_collection']
+    if 'collection_package_id' in ckan_info:
+        record.parentidentifier = ckan_info['collection_package_id']
 
     return record
 
