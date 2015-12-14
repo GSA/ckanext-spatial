@@ -92,7 +92,8 @@ def load(pycsw_config, ckan_url, force_update=False):
     start = 0
     retry_total = 5
     retry_current = 1
-    retry_delay = 5 # in seconds
+    retry_seconds = 5
+    retry_multiply = 3 # longer delay after each failed try
 
     gathered_records = {}
 
@@ -102,6 +103,7 @@ def load(pycsw_config, ckan_url, force_update=False):
         response = requests.get(url)
         if not response.ok:
             if retry_current < retry_total:
+                retry_delay = retry_seconds * retry_multiply ** (retry_current - 1)
                 log.info('%s of %s tries failed. Will try again in %s seconds.' \
                         % (retry_current, retry_total, retry_delay))
                 time.sleep(retry_delay)
