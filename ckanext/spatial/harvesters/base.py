@@ -6,11 +6,15 @@ import sys
 import logging
 from string import Template
 from urlparse import urlparse
+from urlparse import urldefrag
 from datetime import datetime
 import uuid
 import hashlib
 import dateutil
 import mimetypes
+import urllib
+
+import requests.exceptions
 
 
 from pylons import config
@@ -23,12 +27,14 @@ from ckan import model
 from ckan.lib.helpers import json
 from ckan import logic
 from ckan.lib.navl.validators import not_empty
+from ckan.lib.search.index import PackageSearchIndex
 
 from ckanext.harvest.harvesters.base import HarvesterBase
 from ckanext.harvest.model import HarvestObject
 
 from ckanext.spatial.validation import Validators, all_validators
 from ckanext.spatial.model import ISODocument
+from ckanext.spatial.interfaces import ISpatialHarvester
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +61,71 @@ def guess_standard(content):
     return 'unknown'
 
 
+
+def check_url_and_get_metadata(url):
+    """Check whether the given URL is dead or alive.
+    Returns a dict with four keys:
+        "url": The URL that was checked (string)
+        "alive": Whether the URL was working, True or False
+        "status": The HTTP status code of the response from the URL,
+            e.g. 200, 401, 500 (int)
+        "reason": The reason for the success or failure of the check,
+            e.g. "OK", "Unauthorized", "Internal Server Error" (string)
+    The "status" may be None if we did not get a valid HTTP response,
+    e.g. in the event of a timeout, DNS failure or invalid HTTP response.
+    The "reason" will always be a string, but may be a requests library
+    exception string rather than an HTTP reason string if we did not get a valid
+    HTTP response.
+    """
+    result = {"url": url}
+    try:
+        response = requests.get(url,timeout=3.5)
+        #response = requests.get(url)
+        result["status"] = response.status_code
+        result["reason"] = response.reason
+        response.raise_for_status()  # Raise if status_code is not OK.
+        result["alive"] = True
+        contentType = response.headers['content-type']
+        # split the ; off if it exists
+        contentTypeA = contentType.split(";")
+        contentType = contentTypeA[0]
+        result["content-type"] = contentType
+
+	if contentType:
+           if contentType == "text/html":
+              print contentType
+              # Try to get the title
+              regex = re.compile('<title>(.*?)</title>', re.IGNORECASE|re.DOTALL)
+              groups = regex.search(response.text)
+              if groups:
+                result["title"] = groups.group(1)
+    except AttributeError as err:
+        if err.message == "'NoneType' object has no attribute 'encode'":
+            # requests seems to throw these for some invalid URLs.
+            result["alive"] = False
+            result["reason"] = "Invalid URL"
+            result["status"] = None
+        else:
+            raise
+    except requests.exceptions.RequestException as err:
+        result["alive"] = False
+        if "reason" not in result:
+            result["reason"] = str(err)
+        if "status" not in result:
+            # This can happen if the response is invalid HTTP, if we get a DNS
+            # failure, or a timeout, etc.
+            result["status"] = None
+
+    # We should always have these four fields in the result.
+    assert "url" in result
+    assert result.get("alive") in (True, False)
+    assert "status" in result
+    assert "reason" in result
+
+    return result
+
+
+
 def guess_resource_format(url, use_mimetypes=True):
     '''
     Given a URL try to guess the best format to assign to the resource
@@ -71,22 +142,44 @@ def guess_resource_format(url, use_mimetypes=True):
     '''
     url = url.lower().strip()
 
+    # replace escaped characters by single chars:
+    url = urllib.unquote(url);
+    log.debug('Started guess_resource_format function, unquoted url: %s', url)
+
     resource_types = {
+        # formats in OGC services:
+        # numeric keys and nested dicts are so rules can be applied in ordered fashion:
+        1: {'image/png': ('format=image/png',)},
+        2: {'application/pdf': ('format=application/pdf',)},
+        3: {'image/jpeg': ('format=image/jpeg',)},
+        4: {'image/gif': ('format=image/gif',)},
+        5: {'image/tiff': ('format=image/tiff','format=image/tiff8')},
+
+        # GeoServer-specific patterns:
+        6: {'kmz': ('geoserver/\w+/wms/kml?layers=\w+:\w+&mode=refresh', 'geoserver/wms/kml?layers=\w+:\w+&mode=refresh')},
+        7: {'kml': ('geoserver/\w+/wms/kml?layers=\w+:\w+&mode=download', 'geoserver/wms/kml?layers=\w+:\w+&mode=download&mode=download', 'geoserver/\w+/wms/kml', 'geoserver/wms/kml')},
+
         # OGC
-        'wms': ('service=wms', 'geoserver/wms', 'mapserver/wmsserver', 'com.esri.wms.Esrimap'),
-        'wfs': ('service=wfs', 'geoserver/wfs', 'mapserver/wfsserver', 'com.esri.wfs.Esrimap'),
-        'wcs': ('service=wcs', 'geoserver/wcs', 'imageserver/wcsserver', 'mapserver/wcsserver'),
-        'sos': ('service=sos',),
-        'csw': ('service=csw',),
+        8: {'wms': ('service=wms', 'geoserver/wms', 'geoserver/\w+/wms', 'mapserver/wmsserver', 'com.esri.wms.Esrimap', 'service/wms')},
+        9: {'wfs': ('service=wfs', 'geoserver/wfs', 'geoserver/\w+/wfs','mapserver/wfsserver', 'com.esri.wfs.Esrimap')},
+        10: {'wcs': ('service=wcs', 'geoserver/wcs', 'geoserver/\w+/wcs', 'imageserver/wcsserver', 'mapserver/wcsserver')},
+        11: {'sos': ('service=sos',)},
+        12: {'csw': ('service=csw',)},
         # ESRI
-        'kml': ('mapserver/generatekml',),
-        'arcims': ('com.esri.esrimap.esrimap',),
-        'arcgis_rest': ('arcgis/rest/services',),
+        13: {'kml': ('mapserver/generatekml',)},
+        14: {'arcims': ('com.esri.esrimap.esrimap',)},
+        15: {'arcgis_rest': ('arcgis/rest/services',)},
     }
 
-    for resource_type, parts in resource_types.iteritems():
-        if any(part in url for part in parts):
-            return resource_type
+    for index, resource_type_dict in sorted(resource_types.iteritems()):
+        for resource_type, parts in dict(resource_type_dict).iteritems():
+            for part in parts:
+                #expr = re.escape(part)
+                log.debug("resource_type regex check, regex: %s", part)
+                if re.search(r'{0}'.format(part), url):
+                    #if any(part in url for part in parts):
+                    log.debug("returning resource type %s (regex pattern match) from guess_resource_format, regex: %s, index: %d", resource_type, part, index)
+                    return None,resource_type
 
     file_types = {
         'kml' : ('kml',),
@@ -96,18 +189,53 @@ def guess_resource_format(url, use_mimetypes=True):
 
     for file_type, extensions in file_types.iteritems():
         if any(url.endswith(extension) for extension in extensions):
-            return file_type
+            log.debug("returning file type %s (file type detection) from guess_resource_format", file_type)
+            return None,file_type
 
     resource_format, encoding = mimetypes.guess_type(url)
-    if resource_format:
-        return resource_format
+    if resource_format is not None:
+        log.debug("returning resource type %s (mime-detection) from guess_resource_format", resource_format)
+        return encoding, resource_format
+    else: log.debug("spatial harvester url: %s resource format return from guess_type is None", url)
+
+    #add a hack to default http:// to 'text/html':
+    if re.search(r'^http://.*', url) is not None: return None,"text/html"
+
+    return None,None
+
+
+def obtain_resource_protocol(protocol, use_lookup=False):
+    log.debug('Started obtain_resource_protocol function, protocol: %s', protocol)
+
+    # use a lookup table for protocol identifiers, such as: https://github.com/OSGeo/Cat-Interop/blob/master/LinkPropertyLookupTable2.csv
+    if use_lookup:
+        # do_something
+        pass
+
+    protocol_identifiers = {
+        'wms': ('OGC:WMS',),
+        'wfs': ('OGC:WFS',),
+        'wcs': ('OGC:WCS',),
+        'sos': ('OGC:SOS',),
+        'gml': ('OGC:GML',),
+        'arcims': ('ESRI:ArcIMS',),
+        'arcgis_rest': ('ESRI:ArcGIS',)
+    }
+
+    for format, identifiers in sorted(protocol_identifiers.iteritems()):
+        for identifier in identifiers:
+            log.debug("protocol_identifiers loop: format: %s, identifier: %s", format, identifier)
+            if re.search(identifier, protocol):
+                log.debug("returning protocol type %s from obtain_resource_protocol, matched identifier: %s", format, identifier)
+                return format
 
     return None
-
 
 class SpatialHarvester(HarvesterBase):
 
     _user_name = None
+
+    _site_user = None
 
     source_config = {}
 
@@ -137,6 +265,19 @@ class SpatialHarvester(HarvesterBase):
                 if len(unknown_profiles) > 0:
                     raise ValueError('Unknown validation profile(s): %s' % ','.join(unknown_profiles))
 
+            if 'default_tags' in source_config_obj:
+                if not isinstance(source_config_obj['default_tags'],list):
+                    raise ValueError('default_tags must be a list')
+
+            if 'default_extras' in source_config_obj:
+                if not isinstance(source_config_obj['default_extras'],dict):
+                    raise ValueError('default_extras must be a dictionary')
+
+            for key in ('override_extras'):
+                if key in source_config_obj:
+                    if not isinstance(source_config_obj[key],bool):
+                        raise ValueError('%s must be boolean' % key)
+
         except ValueError, e:
             raise e
 
@@ -146,10 +287,6 @@ class SpatialHarvester(HarvesterBase):
 
     ## SpatialHarvester
 
-    '''
-    These methods can be safely overridden by classes extending
-    SpatialHarvester
-    '''
 
     def get_package_dict(self, iso_values, harvest_object):
         '''
@@ -157,19 +294,23 @@ class SpatialHarvester(HarvesterBase):
         package_update. See documentation on
         ckan.logic.action.create.package_create for more details
 
-        Tipically, custom harvesters would only want to add or modify the
-        extras, but the whole method can be replaced if necessary. Note that
-        if only minor modifications need to be made you can call the parent
-        method from your custom harvester and modify the output, eg:
+        Extensions willing to modify the dict should do so implementing the
+        ISpatialHarvester interface
 
-            class MyHarvester(SpatialHarvester):
+            import ckan.plugins as p
+            from ckanext.spatial.interfaces import ISpatialHarvester
 
-                def get_package_dict(self, iso_values, harvest_object):
+            class MyHarvester(p.SingletonPlugin):
 
-                    package_dict = super(MyHarvester, self).get_package_dict(iso_values, harvest_object)
+                p.implements(ISpatialHarvester, inherit=True)
 
-                    package_dict['extras']['my-custom-extra-1'] = 'value1'
-                    package_dict['extras']['my-custom-extra-2'] = 'value2'
+                def get_package_dict(self, context, data_dict):
+
+                    package_dict = data_dict['package_dict']
+
+                    package_dict['extras'].append(
+                        {'key': 'my-custom-extra', 'value': 'my-custom-value'}
+                    )
 
                     return package_dict
 
@@ -185,12 +326,19 @@ class SpatialHarvester(HarvesterBase):
         :returns: A dataset dictionary (package_dict)
         :rtype: dict
         '''
+        log.info('Started get_package_dict function')
 
         tags = []
         if 'tags' in iso_values:
             for tag in iso_values['tags']:
                 tag = tag[:50] if len(tag) > 50 else tag
                 tags.append({'name': tag})
+
+        # Add default_tags from config
+        default_tags = self.source_config.get('default_tags',[])
+        if default_tags:
+           for tag in default_tags:
+              tags.append({'name': tag})
 
         package_dict = {
             'title': iso_values['title'],
@@ -233,6 +381,7 @@ class SpatialHarvester(HarvesterBase):
             'metadata-date',  # Released
             'coupled-resource',
             'contact-email',
+            'contact-name',
             'frequency-of-update',
             'spatial-data-service-type',
         ]:
@@ -333,7 +482,61 @@ class SpatialHarvester(HarvesterBase):
                 url = resource_locator.get('url', '').strip()
                 if url:
                     resource = {}
-                    resource['format'] = guess_resource_format(url)
+                    encoding, format_from_url = guess_resource_format(url)
+                    resource['format'] = format_from_url if format_from_url else iso_values.get('format', '')
+                    if encoding:
+                        resource['mimetype'] = encoding
+                        resource['mimetype_inner'] =  resource['format']
+                    else:
+                        resource['mimetype'] = resource['format'] 
+                        resource['mimetype_inner'] = ''
+
+                     
+
+                    resource['name']  = resource_locator.get('name')
+
+		    #sys.stderr.write("AJS: %s %s %s \n" % (url, resource['mimetype'], resource['mimetype_inner']))
+		    log.debug("AJS: %s %s %s %s \n" % (url, resource['mimetype'], resource['mimetype_inner'],resource['name']))
+
+                    if 'format' not in resource or resource['format'] is None or not resource['name'] :
+                        log.debug("AJS: getting URL to find format (%s), and/or name (%s) from url (%s)",resource['format'],resource['name'],url)
+
+                        #
+                        # if the file format is known, only try to get the title if it is text/html
+                        #
+                        if 'format' in resource and resource['format'] and resource['format']!="text/html":
+                          # 
+                          log.debug("AJS: can't find a title for non html right now")
+                        else:
+                          # pull out the fragment
+                          urlparts = urldefrag(url)
+
+                          weblookup = check_url_and_get_metadata(urlparts[0])
+                          log.debug("AJS: result: %s ",weblookup)
+
+                          if not resource['name']:
+                            if 'title' in weblookup:
+                                resource['name'] = weblookup['title']
+                          if 'format' not in resource or resource['format']:
+                            if 'content-type' in weblookup:
+                                resource['format'] = weblookup['content-type']
+                                resource['mimetype'] = weblookup['content-type']
+
+                    if not resource['name']:
+                      resource['name']= p.toolkit._('Unnamed resource')
+
+
+                    protocol =  resource_locator.get('protocol').strip()
+                    if protocol:
+                        log.debug('Running obtain_resource_protocol for url: %s, protocol: %s', url, protocol)
+                        resource['format'] = obtain_resource_protocol(protocol)
+
+                    if 'format' not in resource or resource['format'] is None:
+                        log.debug('Running guess_resource_format for url: %s', url)
+                        encoding, format_from_url = guess_resource_format(url)
+                        resource['format'] = format_from_url if format_from_url else iso_values.get('format', '')
+
+
                     if resource['format'] == 'wms' and config.get('ckanext.spatial.harvest.validate_wms', False):
                         # Check if the service is a view service
                         test_url = url.split('?')[0] if '?' in url else url
@@ -344,12 +547,37 @@ class SpatialHarvester(HarvesterBase):
                     resource.update(
                         {
                             'url': url,
-                            'name': resource_locator.get('name') or p.toolkit._('Unnamed resource'),
                             'description': resource_locator.get('description') or  '',
                             'resource_locator_protocol': resource_locator.get('protocol') or '',
                             'resource_locator_function': resource_locator.get('function') or '',
                         })
-                    package_dict['resources'].append(resource)
+
+                    # Look inside package_dict and see if there is a duplicate before we add it  
+                    found = False
+                    for index, item in enumerate(package_dict['resources']):
+			# should we check by description as well?
+                        if item['url']==resource['url'] and item['name']==resource['name']:
+                           found = True
+                           break
+                    if found == False:
+                         package_dict['resources'].append(resource)
+
+
+        # Add default_extras from config
+        default_extras = self.source_config.get('default_extras',{})
+        if default_extras:
+           override_extras = self.source_config.get('override_extras',False)
+           for key,value in default_extras.iteritems():
+              log.debug('Processing extra %s', key)
+              if not key in extras or override_extras:
+                 # Look for replacement strings
+                 if isinstance(value,basestring):
+                    value = value.format(harvest_source_id=harvest_object.job.source.id,
+                             harvest_source_url=harvest_object.job.source.url.strip('/'),
+                             harvest_source_title=harvest_object.job.source.title,
+                             harvest_job_id=harvest_object.job.id,
+                             harvest_object_id=harvest_object.id)
+                 extras[key] = value
 
         extras_as_dict = []
         for key, value in extras.iteritems():
@@ -364,34 +592,18 @@ class SpatialHarvester(HarvesterBase):
 
     def transform_to_iso(self, original_document, original_format, harvest_object):
         '''
-        Transforms an XML document to ISO 19139
-
-        This method will be only called from the import stage if the
-        harvest_object content is null and original_document and
-        original_format harvest object extras exist (eg if an FGDC document
-        was harvested).
-
-        In that case, this method should do the necessary to provide an
-        ISO 1939 like document, otherwise the import process will stop.
-
-
-        :param original_document: Original XML document
-        :type original_document: string
-        :param original_format: Original format (eg 'fgdc')
-        :type original_format: string
-        :param harvest_object: HarvestObject domain object (with access to
-            job and source objects)
-        :type harvest_object: HarvestObject
-
-        :returns: An ISO 19139 document or None if the transformation was not
-            successful
-        :rtype: string
-
+        DEPRECATED: Use the transform_to_iso method of the ISpatialHarvester
+        interface
         '''
-
+        self.__base_transform_to_iso_called = True
         return None
 
     def import_stage(self, harvest_object):
+        context = {
+            'model': model,
+            'session': model.Session,
+            'user': self._get_user_name(),
+        }
 
         log = logging.getLogger(__name__ + '.import')
         log.debug('Import stage for harvest object: %s', harvest_object.id)
@@ -415,8 +627,9 @@ class SpatialHarvester(HarvesterBase):
 
         if status == 'delete':
             # Delete package
-            context = {'model': model, 'session': model.Session, 'user': self._get_user_name()}
-
+            context.update({
+                'ignore_auth': True,
+            })
             p.toolkit.get_action('package_delete')(context, {'id': harvest_object.package_id})
             log.info('Deleted package {0} with guid {1}'.format(harvest_object.package_id, harvest_object.guid))
 
@@ -426,7 +639,16 @@ class SpatialHarvester(HarvesterBase):
         original_document = self._get_object_extra(harvest_object, 'original_document')
         original_format = self._get_object_extra(harvest_object, 'original_format')
         if original_document and original_format:
+            #DEPRECATED use the ISpatialHarvester interface method
+            self.__base_transform_to_iso_called = False
             content = self.transform_to_iso(original_document, original_format, harvest_object)
+            if not self.__base_transform_to_iso_called:
+                log.warn('Deprecation warning: calling transform_to_iso directly is deprecated. ' +
+                         'Please use the ISpatialHarvester interface method instead.')
+
+            for harvester in p.PluginImplementations(ISpatialHarvester):
+                content = harvester.transform_to_iso(original_document, original_format, harvest_object)
+
             if content:
                 harvest_object.content = content
             else:
@@ -449,7 +671,9 @@ class SpatialHarvester(HarvesterBase):
 
         # Parse ISO document
         try:
-            iso_values = ISODocument(harvest_object.content).read_values()
+
+            iso_parser = ISODocument(harvest_object.content)
+            iso_values = iso_parser.read_values()
         except Exception, e:
             self._save_object_error('Error parsing ISO document for object {0}: {1}'.format(harvest_object.id, str(e)),
                                     harvest_object, 'Import')
@@ -495,21 +719,27 @@ class SpatialHarvester(HarvesterBase):
         harvest_object.metadata_modified_date = metadata_modified_date
         harvest_object.add()
 
+
         # Build the package dict
         package_dict = self.get_package_dict(iso_values, harvest_object)
+        for harvester in p.PluginImplementations(ISpatialHarvester):
+            package_dict = harvester.get_package_dict(context, {
+                'package_dict': package_dict,
+                'iso_values': iso_values,
+                'xml_tree': iso_parser.xml_tree,
+                'harvest_object': harvest_object,
+            })
         if not package_dict:
             log.error('No package dict returned, aborting import for object {0}'.format(harvest_object.id))
             return False
 
         # Create / update the package
+        context.update({
+           'extras_as_string': True,
+           'api_version': '2',
+           'return_id_only': True})
 
-        context = {'model': model,
-                   'session': model.Session,
-                   'user': self._get_user_name(),
-                   'extras_as_string': True,
-                   'api_version': '2',
-                   'return_id_only': True}
-        if context['user'] == self._site_user['name']:
+        if self._site_user and context['user'] == self._site_user['name']:
             context['ignore_auth'] = True
 
 
@@ -550,7 +780,7 @@ class SpatialHarvester(HarvesterBase):
         elif status == 'change':
 
             # Check if the modified date is more recent
-            if not self.force_import and harvest_object.metadata_modified_date <= previous_object.metadata_modified_date:
+            if not self.force_import and previous_object and harvest_object.metadata_modified_date <= previous_object.metadata_modified_date:
 
                 # Assign the previous job id to the new object to
                 # avoid losing history
@@ -559,6 +789,25 @@ class SpatialHarvester(HarvesterBase):
 
                 # Delete the previous object to avoid cluttering the object table
                 previous_object.delete()
+
+                # Reindex the corresponding package to update the reference to the
+                # harvest object
+                if ((config.get('ckanext.spatial.harvest.reindex_unchanged', True) != 'False'
+                    or self.source_config.get('reindex_unchanged') != 'False')
+                    and harvest_object.package_id):
+                    context.update({'validate': False, 'ignore_auth': True})
+                    try:
+                        package_dict = logic.get_action('package_show')(context,
+                            {'id': harvest_object.package_id})
+                    except p.toolkit.ObjectNotFound:
+                        pass
+                    else:
+                        for extra in package_dict.get('extras', []):
+                            if extra['key'] == 'harvest_object_id':
+                                extra['value'] = harvest_object.id
+                        if package_dict:
+                            package_index = PackageSearchIndex()
+                            package_index.index_package(package_dict)
 
                 log.info('Document with GUID %s unchanged, skipping...' % (harvest_object.guid))
             else:
@@ -637,6 +886,15 @@ class SpatialHarvester(HarvesterBase):
             else:
                 profiles = DEFAULT_VALIDATOR_PROFILES
             self._validator = Validators(profiles=profiles)
+
+            # Add any custom validators from extensions
+            for plugin_with_validators in p.PluginImplementations(ISpatialHarvester):
+                custom_validators = plugin_with_validators.get_validators()
+                for custom_validator in custom_validators:
+                    if custom_validator not in all_validators:
+                        self._validator.add_validator(custom_validator)
+
+
         return self._validator
 
     def _get_user_name(self):
@@ -655,7 +913,11 @@ class SpatialHarvester(HarvesterBase):
         if self._user_name:
             return self._user_name
 
-        self._site_user = p.toolkit.get_action('get_site_user')({'model': model, 'ignore_auth': True}, {})
+        context = {'model': model,
+                   'ignore_auth': True,
+                   'defer_commit': True, # See ckan/ckan#1714
+                  }
+        self._site_user = p.toolkit.get_action('get_site_user')(context, {})
 
         config_user_name = config.get('ckanext.spatial.harvest.user_name')
         if config_user_name:
