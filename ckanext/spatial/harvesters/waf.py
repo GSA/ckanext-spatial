@@ -301,7 +301,7 @@ def _extract_waf(content, base_url, scraper, results = None, depth=0):
                 continue
             log.debug('WAF new_url: %s', new_url)
             try:
-                response = requests.get(new_url)
+                response = requests.get(new_url, timeout=60)
                 content = response.content
             except Exception, e:
                 print str(e)
