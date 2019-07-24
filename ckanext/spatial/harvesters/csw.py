@@ -1,12 +1,14 @@
+import logging
 import re
 import urllib
 import urlparse
 
-import logging
+import pylons.config as config
 
 from ckan import model
 
 from ckan.plugins.core import SingletonPlugin, implements
+from ckan.plugins.toolkit import asint
 
 from ckanext.harvest.interfaces import IHarvester
 from ckanext.harvest.model import HarvestObject
@@ -69,6 +71,8 @@ class CSWHarvester(SpatialHarvester, SingletonPlugin):
         url = harvest_job.source.url
 
         self._set_source_config(harvest_job.source.config)
+        page_size = asint(config.get('ckanext.spatial.csw.page_size',
+                                     self.source_config.get('page_size', 10)))
 
         try:
             self._setup_csw_client(url)
@@ -92,7 +96,7 @@ class CSWHarvester(SpatialHarvester, SingletonPlugin):
         log.debug('Starting gathering for %s' % url)
         guids_in_harvest = set()
         try:
-            for identifier in self.csw.getidentifiers(page=10, outputschema=self.output_schema(), cql=cql):
+            for identifier in self.csw.getidentifiers(page=page_size, outputschema=self.output_schema(), cql=cql):
                 try:
                     log.info('Got identifier %s from the CSW', identifier)
                     if identifier is None:
