@@ -54,6 +54,11 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
     def gather_stage(self,harvest_job,collection_package_id=None):
         log = logging.getLogger(__name__ + '.WAF.gather')
         log.debug('WafHarvester gather_stage for job: %r', harvest_job)
+        print("<><><>")
+        print(harvest_job)
+        #    print("<><>")
+        #    print(response)
+        #    print(content)
 
         self.harvest_job = harvest_job
 
