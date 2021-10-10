@@ -289,6 +289,7 @@ def _extract_waf(content, base_url, scraper, results = None, depth=0):
     except parse.ParseException:
         parsed = scrapers['other'].parseString(content)
 
+    print(parsed)
     for record in parsed:
         url = record.url
         if not url:
