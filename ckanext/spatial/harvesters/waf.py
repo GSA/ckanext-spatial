@@ -329,4 +329,5 @@ def _extract_waf(content, base_url, scraper, results = None, depth=0):
                 date = None
         results.append((urljoin(base_url, record.url), date))
 
+    print("extract_waf", results)
     return results
