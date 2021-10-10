@@ -141,6 +141,7 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
                 )
             return extras
 
+        print(url_to_modified_harvest)
 
         ids = []
         for location in new:
@@ -178,7 +179,6 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
             obj.save()
             ids.append(obj.id)
 
-        print(ids)
         if len(ids) > 0:
             log.debug('{0} objects sent to the next stage: {1} new, {2} change, {3} delete'.format(
                 len(ids), len(new), len(change), len(delete)))
