@@ -289,11 +289,9 @@ def _extract_waf(content, base_url, scraper, results = None, depth=0):
     except parse.ParseException:
         parsed = scrapers['other'].parseString(content)
 
-    print(parsed)
     for record in parsed:
-        print(dir(record))
         url = record.url
-        print(url)
+        print(record.values)
         if not url:
             continue
         if url.startswith('_'):
@@ -324,7 +322,6 @@ def _extract_waf(content, base_url, scraper, results = None, depth=0):
         if not url.endswith('.xml'):
             continue
         date = record.date
-        print(date)
         if date:
             try:
                 date = six.text_type(dateutil.parser.parse(date))
