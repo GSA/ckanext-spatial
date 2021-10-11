@@ -507,6 +507,8 @@ class SpatialHarvester(HarvesterBase):
                     return False
 
         # Parse ISO document
+        print("<><><><><><>")
+        print(harvest_object.content)
         try:
 
             iso_parser = ISODocument(harvest_object.content)
