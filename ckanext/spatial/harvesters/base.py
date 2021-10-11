@@ -563,7 +563,7 @@ class SpatialHarvester(HarvesterBase):
             package_dict = harvester.get_package_dict(context, {
                 'package_dict': package_dict,
                 'iso_values': iso_values,
-                'xml_tree': iso_parser.xml_tree.encode('utf-8'),
+                'xml_tree': iso_parser.xml_tree,
                 'harvest_object': harvest_object,
             })
         if not package_dict:

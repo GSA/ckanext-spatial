@@ -136,6 +136,7 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
                 )
             return extras
 
+
         ids = []
         for location in new:
             guid=hashlib.md5(location.encode('utf8','ignore')).hexdigest()
