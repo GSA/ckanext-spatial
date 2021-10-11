@@ -54,8 +54,6 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
     def gather_stage(self,harvest_job,collection_package_id=None):
         log = logging.getLogger(__name__ + '.WAF.gather')
         log.debug('WafHarvester gather_stage for job: %r', harvest_job)
-        print("<><><>")
-        print(harvest_job)
 
         self.harvest_job = harvest_job
 
@@ -68,15 +66,12 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
         try:
             response = requests.get(source_url, timeout=60)
             response.raise_for_status()
-            print("<><>")
-            print(response)
         except requests.exceptions.RequestException as e:
             self._save_gather_error('Unable to get content for URL: %s: %r' % \
                                         (source_url, e),harvest_job)
             return None
 
         content = response.content
-        print(content)
         scraper = _get_scraper(response.headers.get('server'))
 
         ######  Get current harvest object out of db ######
@@ -150,7 +145,6 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
                                                      'new'),
                                 guid=guid
                                )
-            print(obj)
             obj.save()
             ids.append(obj.id)
 
@@ -328,5 +322,4 @@ def _extract_waf(content, base_url, scraper, results = None, depth=0):
                 date = None
         results.append((urljoin(base_url, record.url), date))
 
-    print("extract_waf", results)
     return results
