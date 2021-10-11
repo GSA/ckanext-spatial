@@ -99,8 +99,8 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
 
 
         for guid, package_id, modified_date, url, state in query:
-            url_to_modified_db[url] = modified_date
-            url_to_ids[url] = (guid, package_id)
+            url_to_modified_db[six.text_type(url)] = modified_date
+            url_to_ids[six.text_type(url)] = (guid, package_id)
             if state == 'deleted': url_deleted.add(url)
 
         ######  Get current list of records from source ######
@@ -108,7 +108,7 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
         url_to_modified_harvest = {} ## mapping of url to last_modified in harvest
         try:
             for url, modified_date in _extract_waf(six.text_type(content),source_url,scraper):
-                url_to_modified_harvest[url] = modified_date
+                url_to_modified_harvest[six.text_type(url)] = modified_date
         except Exception as e:
             msg = 'Error extracting URLs from %s, error was %s' % (source_url, e)
             self._save_gather_error(msg,harvest_job)
@@ -141,8 +141,6 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
                 )
             return extras
 
-        print(url_to_modified_harvest)
-
         ids = []
         for location in new:
             guid=hashlib.md5(location.encode('utf8','ignore')).hexdigest()
@@ -152,6 +150,7 @@ class WAFHarvester(SpatialHarvester, SingletonPlugin):
                                                      'new'),
                                 guid=guid
                                )
+            print(obj)
             obj.save()
             ids.append(obj.id)
 
@@ -291,7 +290,6 @@ def _extract_waf(content, base_url, scraper, results = None, depth=0):
 
     for record in parsed:
         url = record.url
-        print(record.values)
         if not url:
             continue
         if url.startswith('_'):
