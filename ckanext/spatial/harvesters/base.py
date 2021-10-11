@@ -508,10 +508,11 @@ class SpatialHarvester(HarvesterBase):
 
         # Parse ISO document
         print("<><><><><><>")
-        print(harvest_object.content)
+        print(type(harvest_object.content))
         try:
 
             iso_parser = ISODocument(harvest_object.content)
+            print(type(iso_parser))
             iso_values = iso_parser.read_values()
         except Exception as e:
             self._save_object_error('Error parsing ISO document for object {0}: {1}'.format(harvest_object.id, six.text_type(e)),
@@ -565,7 +566,7 @@ class SpatialHarvester(HarvesterBase):
             package_dict = harvester.get_package_dict(context, {
                 'package_dict': package_dict,
                 'iso_values': iso_values,
-                'xml_tree': iso_parser.xml_tree,
+                'xml_tree': iso_parser.xml_tree.encode('utf-8'),
                 'harvest_object': harvest_object,
             })
         if not package_dict:
