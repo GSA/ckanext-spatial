@@ -37,7 +37,7 @@ class MappedXmlDocument(MappedXmlObject):
 
     def get_xml_tree(self):
         if self.xml_tree is None:
-            parser = etree.XMLParser(remove_blank_text=True)
+            parser = etree.XMLParser(remove_blank_text=True, encoding='utf-8')
             xml_str = six.ensure_str(self.xml_str)
             self.xml_tree = etree.fromstring(xml_str, parser=parser)
         return self.xml_tree
