@@ -531,14 +531,10 @@ class SpatialHarvester(HarvesterBase):
             context.update({
                 'ignore_auth': True,
             })
-            if harvest_object.package_id:
-                p.toolkit.get_action('package_delete')(context, {'id': harvest_object.package_id})
-                log.info('Deleted package {0} with guid {1}'.format(harvest_object.package_id, harvest_object.guid))
-                return True
-            else:
-                log.info('package_id not found with guid {0}'.format(harvest_object.guid))
-                self._save_object_error('Deleting package failed', harvest_object, 'Import')
-                return False
+            p.toolkit.get_action('package_delete')(context, {'id': harvest_object.package_id})
+            log.info('Deleted package {0} with guid {1}'.format(harvest_object.package_id, harvest_object.guid))
+
+            return True
 
         # Check if it is a non ISO document
         original_document = self._get_object_extra(harvest_object, 'original_document')
