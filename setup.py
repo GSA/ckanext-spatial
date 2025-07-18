@@ -1,7 +1,20 @@
+import re
+import os.path
 from setuptools import setup, find_packages
-from ckanext.spatial import __version__
 
-version = __version__
+def get_version():
+    """Get version from __init__.py without importing the module"""
+    here = os.path.abspath(os.path.dirname(__file__))
+    init_path = os.path.join(here, 'ckanext', 'spatial', '__init__.py')
+    with open(init_path, 'r') as f:
+        content = f.read()
+
+    version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", content, re.M)
+    if version_match:
+        return version_match.group(1)
+    raise RuntimeError("Unable to find version string in __init__.py")
+
+version = get_version()
 
 setup(
     name="ckanext-spatial",
